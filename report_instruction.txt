@@ -1,0 +1,330 @@
+Для взаимодействия с данной лабораторной работой необходимо вводить команды в bash.
+
+0. Первоначальное скачивание драйверов
+chmod +x download_jars.sh postgres/load_data.sh
+./download_jars.sh
+
+
+1. Запуск всего кластера
+docker compose down -v (для повторных запусков)
+docker compose up -d --build
+
+
+2. 
+Веб-интерфейсы:
+- Spark master:   http://localhost:8080
+- Jupyter:        http://localhost:8888  (токен: `bigdata`)
+- ClickHouse:     http://localhost:8123
+- Neo4j Browser:  http://localhost:7474  (логин: `neo4j` / `test1234`)
+
+
+3. Преобразование raw_data → снежинка
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar \
+    /opt/spark-apps/etl_to_star_schema.py
+
+
+4. Преобразование снежинка → ClickHouse
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar,/opt/spark-jars/clickhouse-jdbc-0.6.0-patch5-all.jar \
+    /opt/spark-apps/etl_to_clickhouse.py
+
+
+5. Запуск Cassandra
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar \
+    --packages com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
+    --conf spark.jars.ivy=/tmp/.ivy2 \
+    --conf spark.cassandra.connection.host=cassandra \
+    --conf spark.cassandra.connection.port=9042 \
+    /opt/spark-apps/etl_to_cassandra.py
+
+
+6. Запуск MongoDB
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar \
+    --packages org.mongodb.spark:mongo-spark-connector_2.12:10.3.0 \
+    --conf spark.jars.ivy=/tmp/.ivy2 \
+    /opt/spark-apps/etl_to_mongodb.py
+
+
+7. Запуск Neo4j
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar \
+    /opt/spark-apps/etl_to_neo4j.py
+
+
+8. Запуск Valkey
+docker exec -it bigdata_lab2_spark_master /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark-jars/postgresql-42.7.1.jar \
+    /opt/spark-apps/etl_to_valkey.py
+
+
+9. Проверки хранилищ
+Схема снежинки
+docker exec -it bigdata_lab2_pg psql -U admin -d bigdata -c "
+SELECT 'fact_sales'    t, COUNT(*) FROM fact_sales   UNION ALL
+SELECT 'dim_customer',    COUNT(*) FROM dim_customer UNION ALL
+SELECT 'dim_product',     COUNT(*) FROM dim_product  UNION ALL
+SELECT 'dim_store',       COUNT(*) FROM dim_store    UNION ALL
+SELECT 'dim_supplier',    COUNT(*) FROM dim_supplier;"
+
+
+10. Проверка таблиц через ClickHouse
+docker exec -it bigdata_lab2_ch clickhouse-client --database reports
+
+SELECT name, total_rows
+FROM system.tables
+WHERE database = 'reports' AND name LIKE 'report_%'
+ORDER BY name;
+
+-- Топ-10 самых продаваемых продуктов (по количеству)
+SELECT product_name, total_quantity, sales_count
+FROM reports.report_sales_by_product
+ORDER BY total_quantity DESC LIMIT 10;
+
+-- Общая выручка по категориям продуктов
+SELECT DISTINCT category_name, category_revenue
+FROM reports.report_sales_by_product
+ORDER BY category_revenue DESC;
+
+-- Средний рейтинг и количество отзывов для каждого продукта
+SELECT product_name, product_rating, product_reviews
+FROM reports.report_sales_by_product
+ORDER BY product_rating DESC LIMIT 10;
+
+-- Топ-10 клиентов с наибольшей общей суммой покупок
+SELECT customer_name, country_name, total_spent, orders_count
+FROM reports.report_sales_by_customer
+ORDER BY total_spent DESC LIMIT 10;
+
+-- Распределение клиентов по странам
+SELECT country_name,
+       count()        AS customers,
+       sum(total_spent) AS total_revenue
+FROM reports.report_sales_by_customer
+GROUP BY country_name
+ORDER BY total_revenue DESC;
+
+-- Средний чек для каждого клиента (топ-10)
+SELECT customer_name, avg_ticket
+FROM reports.report_sales_by_customer
+ORDER BY avg_ticket DESC LIMIT 10;
+
+-- Месячные тренды продаж
+SELECT year, month, revenue, units_sold, orders_count
+FROM reports.report_sales_by_time
+ORDER BY year, month;
+
+-- Годовые тренды (суммирование по месяцам)
+SELECT year,
+       sum(revenue)      AS yearly_revenue,
+       sum(units_sold)   AS yearly_units,
+       sum(orders_count) AS yearly_orders
+FROM reports.report_sales_by_time
+GROUP BY year
+ORDER BY year;
+
+-- Средний размер заказа по месяцам (усреднение по всем годам)
+SELECT month,
+       avg(avg_order) AS avg_monthly_order
+FROM reports.report_sales_by_time
+GROUP BY month
+ORDER BY month;
+
+-- Топ-5 магазинов с наибольшей выручкой
+SELECT store_name, store_city, country_name, total_revenue
+FROM reports.report_sales_by_store
+ORDER BY total_revenue DESC LIMIT 5;
+
+-- Распределение продаж по городам и странам
+SELECT country_name, store_city,
+       sum(total_revenue) AS revenue,
+       sum(orders_count)  AS orders
+FROM reports.report_sales_by_store
+GROUP BY country_name, store_city
+ORDER BY revenue DESC LIMIT 10;
+
+-- Средний чек для каждого магазина (топ-5)
+SELECT store_name, avg_ticket
+FROM reports.report_sales_by_store
+ORDER BY avg_ticket DESC LIMIT 5;
+
+-- Топ-5 поставщиков с наибольшей выручкой
+SELECT supplier_name, country_name, total_revenue, orders_count
+FROM reports.report_sales_by_supplier
+ORDER BY total_revenue DESC LIMIT 5;
+
+-- Средняя цена товаров от каждого поставщика
+SELECT supplier_name, avg_product_price
+FROM reports.report_sales_by_supplier
+ORDER BY avg_product_price DESC;
+
+-- Распределение продаж по странам поставщиков
+SELECT country_name,
+       sum(total_revenue) AS revenue,
+       count()            AS suppliers
+FROM reports.report_sales_by_supplier
+GROUP BY country_name
+ORDER BY revenue DESC;
+
+-- Продукты с наивысшим рейтингом
+SELECT product_name, category_name, product_rating, product_reviews
+FROM reports.report_product_quality
+ORDER BY product_rating DESC LIMIT 10;
+
+-- Продукты с наименьшим рейтингом
+SELECT product_name, category_name, product_rating, product_reviews
+FROM reports.report_product_quality
+ORDER BY product_rating ASC LIMIT 10;
+
+-- Корреляция между рейтингом и объёмом продаж
+SELECT product_rating,
+       avg(total_revenue)  AS avg_revenue,
+       avg(total_quantity) AS avg_units
+FROM reports.report_product_quality
+GROUP BY product_rating
+ORDER BY product_rating DESC;
+
+-- Продукты с наибольшим количеством отзывов
+SELECT product_name, product_reviews, product_rating, total_revenue
+FROM reports.report_product_quality
+ORDER BY product_reviews DESC LIMIT 10;
+
+
+11. То же самое через Cassandra
+
+docker exec -it bigdata_lab2_cassandra cqlsh
+
+USE reports;
+DESCRIBE TABLES;
+
+-- Топ-5 продуктов по выручке
+SELECT product_name, total_revenue, total_quantity
+FROM report_sales_by_product
+WHERE partition_key = 1 LIMIT 5;
+
+-- Топ-5 клиентов
+SELECT customer_name, total_spent, avg_ticket
+FROM report_sales_by_customer
+WHERE partition_key = 1 LIMIT 5;
+
+-- Тренды по времени
+SELECT year, month, revenue, units_sold
+FROM report_sales_by_time
+WHERE partition_key = 1;
+
+-- Топ-5 магазинов
+SELECT store_name, country_name, total_revenue
+FROM report_sales_by_store
+WHERE partition_key = 1 LIMIT 5;
+
+-- Топ-5 поставщиков
+SELECT supplier_name, country_name, total_revenue
+FROM report_sales_by_supplier
+WHERE partition_key = 1 LIMIT 5;
+
+-- Продукты с наивысшим рейтингом
+SELECT product_name, product_rating, product_reviews
+FROM report_product_quality
+WHERE partition_key = 1 LIMIT 10;
+
+
+12. Проверка через MongoDB
+
+docker exec -it bigdata_lab2_mongo mongosh --quiet
+
+db = db.getSiblingDB("reports")
+db.getCollectionNames()
+
+// Топ-5 продуктов по выручке
+db.report_sales_by_product.find(
+  {}, {product_name:1, total_revenue:1, _id:0}
+).sort({total_revenue:-1}).limit(5)
+
+// Топ-5 клиентов
+db.report_sales_by_customer.find(
+  {}, {customer_name:1, total_spent:1, country_name:1, _id:0}
+).sort({total_spent:-1}).limit(5)
+
+// Тренды по времени
+db.report_sales_by_time.find(
+  {}, {year:1, month:1, revenue:1, _id:0}
+).sort({year:1, month:1})
+
+// Топ-5 магазинов
+db.report_sales_by_store.find(
+  {}, {store_name:1, total_revenue:1, country_name:1, _id:0}
+).sort({total_revenue:-1}).limit(5)
+
+// Топ-5 поставщиков
+db.report_sales_by_supplier.find(
+  {}, {supplier_name:1, total_revenue:1, _id:0}
+).sort({total_revenue:-1}).limit(5)
+
+// Продукты с наивысшим рейтингом
+db.report_product_quality.find(
+  {}, {product_name:1, product_rating:1, product_reviews:1, _id:0}
+).sort({product_rating:-1}).limit(10)
+
+
+13. Проверка через Neo4j
+
+docker exec -it bigdata_lab2_neo4j cypher-shell -u neo4j -p test1234
+
+// Список меток (один лейбл = один отчёт)
+CALL db.labels() YIELD label RETURN label ORDER BY label;
+
+// Топ-5 продуктов по выручке
+MATCH (n:Report_sales_by_product)
+RETURN n.product_name AS product, n.total_revenue AS revenue
+ORDER BY revenue DESC LIMIT 5;
+
+// Топ-5 клиентов
+MATCH (n:Report_sales_by_customer)
+RETURN n.customer_name AS customer, n.total_spent AS spent
+ORDER BY spent DESC LIMIT 5;
+
+// Тренды по времени
+MATCH (n:Report_sales_by_time)
+RETURN n.year AS year, n.month AS month, n.revenue AS revenue
+ORDER BY year, month;
+
+// Топ-5 магазинов
+MATCH (n:Report_sales_by_store)
+RETURN n.store_name AS store, n.total_revenue AS revenue
+ORDER BY revenue DESC LIMIT 5;
+
+// Топ-5 поставщиков
+MATCH (n:Report_sales_by_supplier)
+RETURN n.supplier_name AS supplier, n.total_revenue AS revenue
+ORDER BY revenue DESC LIMIT 5;
+
+// Продукты с наивысшим рейтингом
+MATCH (n:Report_product_quality)
+RETURN n.product_name AS product, n.product_rating AS rating, n.product_reviews AS reviews
+ORDER BY rating DESC LIMIT 10;
+
+
+14. Проверка через Valkey
+
+# Список всех ключей отчёта о продуктах
+docker exec -it bigdata_lab2_valkey valkey-cli SMEMBERS report_sales_by_product:_keys
+
+# Все поля одной строки (product_id=1)
+docker exec -it bigdata_lab2_valkey valkey-cli HGETALL report_sales_by_product:1
+
+# Получить одно поле
+docker exec -it bigdata_lab2_valkey valkey-cli HGET report_sales_by_product:1 total_revenue
+
+# Количество строк в отчёте
+docker exec -it bigdata_lab2_valkey valkey-cli SCARD report_sales_by_product:_keys
+
+# Список всех отчётных ключей в хранилище
+docker exec -it bigdata_lab2_valkey valkey-cli KEYS "*:_keys"

@@ -1,0 +1,189 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: bigdata_lab2_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: bigdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./postgres/load_data.sh:/docker-entrypoint-initdb.d/02_load.sh:ro
+      - ./исходные данные:/csv:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d bigdata"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: bigdata_lab2_ch
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: reports
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  spark-master:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: ./spark/Dockerfile
+    image: bigdata-lab2-spark:3.5.0
+    container_name: bigdata_lab2_spark_master
+    restart: unless-stopped
+    entrypoint: []
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - ./spark:/opt/spark-apps:ro
+      - ./jars:/opt/spark-jars:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      cassandra:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      mongo:
+        condition: service_started
+      valkey:
+        condition: service_started
+
+  spark-worker:
+    platform: linux/amd64
+    image: bigdata-lab2-spark:3.5.0
+    container_name: bigdata_lab2_spark_worker
+    restart: unless-stopped
+    entrypoint: []
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+    environment:
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      SPARK_NO_DAEMONIZE: "true"
+    volumes:
+      - ./spark:/opt/spark-apps:ro
+      - ./jars:/opt/spark-jars:ro
+    depends_on:
+      - spark-master
+
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: bigdata_lab2_jupyter
+    restart: unless-stopped
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: bigdata
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./spark:/home/jovyan/work:ro
+      - ./jars:/home/jovyan/jars:ro
+    depends_on:
+      - spark-master
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: bigdata_lab2_cassandra
+    restart: unless-stopped
+    environment:
+      CASSANDRA_CLUSTER_NAME: bigdata
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: SimpleSnitch
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 1G
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  neo4j:
+    image: neo4j:5
+    container_name: bigdata_lab2_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/test1234
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p test1234 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  mongo:
+    image: mongo:7
+    container_name: bigdata_lab2_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  valkey:
+    image: valkey/valkey:7.2
+    container_name: bigdata_lab2_valkey
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  cassandra_data:
+  neo4j_data:
+  mongo_data:
+  valkey_data:
